@@ -100,15 +100,82 @@ The symmetric mesh can be used to setup a floating body::
 Expected performance gain
 ~~~~~~~~~~~~~~~~~~~~~~~~~
 
-Asymptotically for large problems:
+Resolution time
+---------------
 
-+---------------------+-----------------+-----------+
-| Symmetry            | Resolution time | RAM usage |
-+---------------------+-----------------+-----------+
-| 1 plane symmetry    | 1/2             | 1/2       |
-| 2 plane symmetries  | 1/4             | 1/4       |
-| n rotation symmetry | 1/n             | 1/n       |
-+---------------------+-----------------+-----------+
+Considering a 1 plane symmetry problem, the size of the problem goes from :math:`N` 
+to 2 blocks of size :math:`N/2`.
+For a 2 plane symmetry problem, we end up with 4 blocks size :math:`N/4`.
+
+More generally for an :math:`n` rotation symmetry problem, the problem is decomposed 
+into :math:`n` blocks of size :math:`N/n`.
+
+Thus, asymptotically and for large problems the overall gain factor in the resolution time 
+is approximately :math:`1/n`. 
+However, by decomposing the solution time into its main computational steps,  
+we can give a more precise estimate  of the gain factor for each step.
+
+This gain depends on the chosen linear solver. There is no gain for the GMRES solver.
+Since the LU decomposition has a computational complexity of :math:`O(N^3)`, 
+the expected gain factor is :math:`1/n^2`. 
+The time spent computing the Green's function is reduced by a factor :math:`1/n`.
+There is no gain for the matrix-vector product.
+
+Estimating the overall performance gain remains difficult,  
+as it strongly depends on the relative proportion of each computational step,  
+which is problem-dependent. 
+
++------------------------+----------------+-----------+--------------+------------------------+
+| Symmetry               | Green function | LU solver | GMRES solver |  Matrix-vector product |
++------------------------+----------------+-----------+--------------+------------------------+
+|| 1 plane symmetry or   || 1/2           || 1/4      || 1           || 1                     |
+|| 2 rotation symmetry   ||               ||          ||             ||                       |
++------------------------+----------------+-----------+--------------+------------------------+
+|| 2 plane symmetries or || 1/4           || 1/16     || 1           || 1                     |
+|| 2 rotation symmetry   ||               ||          ||             ||                       |
++------------------------+----------------+-----------+--------------+------------------------+
+| n rotation symmetry    | 1/n            | 1/n²      | 1            | 1                      |
++------------------------+----------------+-----------+--------------+------------------------+
+
+
+RAM usage 
+---------
+
+Regarding RAM usage, there is also, asymptotically for large problems, 
+a gain factor of :math:`1/n`.
+This gain is exact for GMRES solver.
+However, it is slightly lower for the LU solver due to intermediate step. 
+
+Solving a problem of size :math:`N` with an LU solver requires 3 matrices 
+(2 for the resolution of the problem itself, and 1 for the LU decomposition),
+which corresponds to :math:`3N^2` memory allocations.
+
+Considering a n rotation symmetry problem there is still 2 matrices 
+for the resolution of the problem but made of n blocks of size :math:`N/n`.
+There are :math:`n` LU decomposition of size :math:`N/n` 
+and there is also one intermediate step made of n blocks of size :math:`N/n`.
+Finally there are :math:`2n(N/n)^2 + n(N/n)^2 + n(N/n)^2 = 4N^2/n` allocations, 
+thus the gain factor is :math:`4/3n`. 
+
+For the 1 plane symmetry problem the reasoning is exactly the same. 
+
+The 2 plane symmetries case is a bit different. 
+Since the symmetries are nested, there are actually three intermediate steps: 
+one of size 4 blocks :math:`N/4`, and two more of size 2 blocks :math:`N/4`. 
+Finally there are :math:`2*4(N/4)^2 + 4(N/4)^2 + 4(N/4)^2 + 2*2(N/4)^2 = 5N^2/4` allocations, 
+thus the gain factor is :math:`5/12`.
+
+
++---------------------+-----------+--------------+
+| Symmetry            | LU solver | GMRES solver |
++---------------------+-----------+--------------+
+| 1 plane symmetry    | 2/3       | 1/2          |
++---------------------+-----------+--------------+
+| 2 plane symmetries  | 5/12      | 1/4          |
++---------------------+-----------+--------------+
+| n rotation symmetry | 4/3n      | 1/n          |
++---------------------+-----------+--------------+
+
 
 Note that the theoretical performance gain described above might not be reached
 in practice, especially for smaller problems.
