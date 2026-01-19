@@ -10,11 +10,9 @@ from capytaine.post_pro.rao import rao
 def compute_kochin_global(dataset, a):
     Hd = dataset['kochin_diffraction']
     Hr = dataset['kochin'] # shape (nb_omega, nb_dofs, nb_theta)
-    # print(Hr)
     omega = dataset['omega']
-    X = rao(dataset)
-    print(X)
-    sum_HdX = sum(Hr[0,i]*X[0,0,0,i] for i in range(6)) # shape (nb_omega, nb_wavelength, wave_direction, nb_dofs)
+    X = rao(dataset) # shape (nb_omega, wave_direction, nb_dofs)
+    sum_HdX = sum(Hr[:,i,:]*X[:,0,i] for i in range(6)) 
 
     return a*1j*Hd + a*omega*sum_HdX
 
@@ -33,8 +31,8 @@ def far_field(dataset, a):
         k0 = omega**2/g 
         coef2 = 8*np.pi*rho*k*(k0*h)**2 / (h*((k*h)**2 - (k0*h)**2 + k0*h))
  
-    H = compute_kochin_global(dataset, a)[0,0,:]
-    H_beta = H[np.where(theta_range == wave_direction)[0][0]]
+    H = compute_kochin_global(dataset, a)[:,0,:]
+    H_beta = H[:,np.where(theta_range == wave_direction)[0][0]]
     coef1 = 2*np.pi*rho*a*omega
     
     F = np.array([
@@ -42,6 +40,7 @@ def far_field(dataset, a):
         -coef1*np.sin(beta)*np.imag(H_beta) - coef2*trapezoid(np.real(H)*np.imag(np.conjugate(H))*np.sin(theta), theta)
         ])
 
+    print(np.shape(F))
     return F
 
 def sphere_exact_drift(r, beta):
@@ -81,11 +80,11 @@ if __name__ == "__main__":
 
     F_analytic=[0, 0, 0.07, 0.26, 0.49, 0.70, 0.83, 0.88, 0.84, 0.72, 0.66, 0.655, 0.652]
     ka_analytic = np.array([0.3, 0.5, 0.83, 0.92, 1.0, 1.05, 1.09, 1.16, 1.24, 1.39, 1.59, 1.88, 2.28])
-    k = np.array([1,2])
+    omega = np.sqrt(g*ka_analytic*np.tanh(ka_analytic*water_depth))
 
     solver = cpt.BEMSolver()
     test_matrix = xr.Dataset(coords={
-        'wavenumber': k, 'water_depth': water_depth, 'wave_direction': wave_direction, 'theta': theta_range, 'radiating_dof': list(body.dofs.keys()), 'rho': rho
+        'omega': omega, 'water_depth': water_depth, 'wave_direction': wave_direction, 'theta': theta_range, 'radiating_dof': list(body.dofs.keys()), 'rho': rho
     })
     solver = cpt.BEMSolver()
     dataset = solver.fill_dataset(test_matrix, body.immersed_part(), hydrostatics=True)
@@ -93,7 +92,7 @@ if __name__ == "__main__":
 
     plt.plot(ka_analytic, F_analytic, '-o', label = 'analytical')
     plt.grid()
-    plt.plot(k, far_field(dataset, a)[0][0][0,:]/(g*rho*a**2*radius), '-x', label='far field formulation')
+    plt.plot(ka_analytic, far_field(dataset, a)[0][:]/(g*rho*a**2*radius), '-x', label='far field formulation')
     plt.legend()
     plt.xlabel('k*a')
     plt.ylabel('F_drift/(rho*g*a²*r)')
