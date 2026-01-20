@@ -9,11 +9,10 @@ from capytaine.post_pro.rao import rao
 
 def compute_kochin_global(dataset, a):
     Hd = dataset['kochin_diffraction']
-    Hr = dataset['kochin'] # shape (nb_omega, nb_dofs, nb_theta)
+    Hr = dataset['kochin_radiation'] 
     omega = dataset['omega']
-    X = rao(dataset) # shape (nb_omega, wave_direction, nb_dofs)
+    X = rao(dataset) 
     sum_HdX = sum(Hr[:,i,:]*X[:,0,i] for i in range(6)) 
-
     return a*1j*Hd + a*omega*sum_HdX
 
 def far_field(dataset, a):
@@ -40,16 +39,11 @@ def far_field(dataset, a):
         -coef1*np.sin(beta)*np.imag(H_beta) - coef2*trapezoid(np.real(H)*np.imag(np.conjugate(H))*np.sin(theta), theta)
         ])
 
-    print(np.shape(F))
     return F
-
-def sphere_exact_drift(r, beta):
-    return (2/3)*rho*g*a**2*r*np.cos(beta)
-
 
 if __name__ == "__main__":
     g = _default_parameters["g"]
-    rho = 1000 #_default_parameters["rho"]
+    rho = _default_parameters["rho"]
     a = 1
     wave_direction = 0
     water_depth = 200
@@ -69,22 +63,12 @@ if __name__ == "__main__":
     body.inertia_matrix = body.compute_rigid_body_inertia()
     body.hydrostatic_stiffness = body.compute_hydrostatic_stiffness()
 
-    # problems = [
-    #     cpt.RadiationProblem(body=body, radiating_dof=dof, omega=omega)
-    #     for dof in body.dofs
-    # ]
-    # problems.append(cpt.DiffractionProblem(body=body, omega=omega))
-    # solver = cpt.BEMSolver()
-    # results = solver.solve_all(problems)
-    # hydrostatics = body.compute_hydrostatics()
-
     F_analytic=[0, 0, 0.07, 0.26, 0.49, 0.70, 0.83, 0.88, 0.84, 0.72, 0.66, 0.655, 0.652]
     ka_analytic = np.array([0.3, 0.5, 0.83, 0.92, 1.0, 1.05, 1.09, 1.16, 1.24, 1.39, 1.59, 1.88, 2.28])
-    omega = np.sqrt(g*ka_analytic*np.tanh(ka_analytic*water_depth))
 
     solver = cpt.BEMSolver()
     test_matrix = xr.Dataset(coords={
-        'omega': omega, 'water_depth': water_depth, 'wave_direction': wave_direction, 'theta': theta_range, 'radiating_dof': list(body.dofs.keys()), 'rho': rho
+        'wavenumber': ka_analytic, 'water_depth': water_depth, 'wave_direction': wave_direction, 'theta': theta_range, 'radiating_dof': list(body.dofs.keys()), 'rho': rho
     })
     solver = cpt.BEMSolver()
     dataset = solver.fill_dataset(test_matrix, body.immersed_part(), hydrostatics=True)
