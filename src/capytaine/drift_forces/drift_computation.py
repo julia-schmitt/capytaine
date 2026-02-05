@@ -7,8 +7,7 @@ import capytaine as cpt
 from capytaine.bem.problems_and_results import _default_parameters
 from capytaine.bem.airy_waves import airy_waves_free_surface_elevation
 from capytaine.post_pro.rao import rao
-from capytaine.tools.lists_of_points import _normalize_points, _normalize_free_surface_points
-
+from capytaine.new_meshes.geometry import compute_faces_normals
 
 ### Far field formulation ###
 def compute_kochin_global(dataset, a, fixed=False):
@@ -92,6 +91,7 @@ def edges_water_line(mesh):
     epsilon = 1e-6
     indices_vertices = []
     edges_water_line = []
+    faces_water_line = []
     for i in range(mesh.nb_vertices):
         if np.abs(mesh.vertices[i,-1]) <= epsilon:        
             indices_vertices.append(i)
@@ -100,8 +100,9 @@ def edges_water_line(mesh):
         list_indices = [index for index in mesh.faces[k,:] if index in indices_vertices]
         if len(list_indices) == 2:
             edges_water_line.append(list_indices)
+            faces_water_line.append(mesh.faces[k,:])
 
-    return np.array(edges_water_line)
+    return np.array(edges_water_line) # np.array(faces_water_line)
 
 def length_edges_water_line(mesh):
     """Return array of shape (nb_edges_water_line) with the length of the vertices"""
@@ -123,30 +124,37 @@ def water_line_integral(mesh, data):
 
 ### Near field formulation ###
 def near_field(mesh, res, solver, pb):
-    rho = pb.rho
-    g = pb.g
+    rho = pb[-1].rho
+    g = pb[-1].g 
 
-    velocity = solver.compute_velocity(mesh, res)
-    velocity_square = np.sum(np.abs(velocity)**2, axis=1) 
-    normal_surface, _ = _normalize_free_surface_points(mesh)
-    coef1 = (rho/4)*mesh.surface_integral(velocity_square*normal_surface[:,0]) #je recupere la composante x pour l'instant 
+    # X = rao(dataset)
+
+    grad_phi = solver._compute_potential_gradient(mesh, res[-1]) #+ sum(solver._compute_potential_gradient(mesh, res[i])*X[:,0,i].item() for i in range(6))
+    grad_phi_square = np.sum(np.abs(grad_phi)**2, axis=1) 
+    coef1 = (rho/4)*mesh.surface_integral(grad_phi_square*mesh.faces_normals[:,0]) #je recupere la composante x pour l'instant 
 
     edges = edges_water_line(mesh)
     vertices_left = mesh.vertices[edges[:,0],:]
     vertices_right = mesh.vertices[edges[:,1],:]
-    vertices_middle = (vertices_left + vertices_right)/2
-    normal_point, _ = _normalize_points(vertices_middle)
+    vertices_middle = ((vertices_left + vertices_right)/2)[:,:-1]
+    n_x = vertices_middle[:,0] / np.linalg.norm(vertices_middle, axis=1)
 
-    eta = airy_waves_free_surface_elevation(vertices_middle, res) + solver.compute_free_surface_elevation(vertices_middle, res) 
-    coef2 = (rho*g/4)*water_line_integral(mesh, np.abs(eta)**2*normal_point[:,0])  #je recupere la composante x pour l'instant
+    eta = airy_waves_free_surface_elevation(vertices_middle, pb[-1]) + solver.compute_free_surface_elevation(vertices_middle, res[-1]) #+ sum(solver.compute_free_surface_elevation(vertices_middle, res[i])*X[:,0,i].item() for i in range(6))
+    coef2 = (rho*g/4)*water_line_integral(mesh, np.abs(eta)**2*n_x)  #je recupere la composante x pour l'instant
 
     return coef1 - coef2
 
+def test_curvilinear_integration():
+    radius = 1
+    mesh = cpt.mesh_sphere(radius=radius, resolution=(50, 50), center=(0,0,0)).immersed_part()
+    length = length_edges_water_line(mesh)
+    integral = water_line_integral(mesh, np.ones(np.shape(length)[0]))
+    assert np.isclose(integral, 2*np.pi*radius, rtol=1e-3), "Curvilinear integration along water line failed"
 
 
 if __name__ == "__main__":
-    # g = _default_parameters["g"]
-    # rho = _default_parameters["rho"]
+    g = _default_parameters["g"]
+    rho = _default_parameters["rho"]
     a = 1
     wave_direction = 0
     # omega_range = [0.5]
@@ -165,14 +173,22 @@ if __name__ == "__main__":
     body.hydrostatic_stiffness = body.compute_hydrostatic_stiffness()
 
     solver = cpt.BEMSolver()
-    problem = [cpt.DiffractionProblem(body=body, wavenumber=k, wave_direction=wave_direction)]
-    res = solver.solve_all(problem)
-    # test_matrix = xr.Dataset(coords={
-    #     'wavenumber': k, 'wave_direction': wave_direction, 'theta': theta_range, 'radiating_dof': list(body.dofs.keys())
-    # })
+    problems = [
+        # cpt.RadiationProblem(body=body, radiating_dof=dof, wavenumber=k)
+        # for dof in body.dofs
+    ]
+    problems.append(cpt.DiffractionProblem(body=body, wavenumber=k, wave_direction=wave_direction))
+    res = solver.solve_all(problems)
+    test_matrix = xr.Dataset(coords={
+        'wavenumber': k, 'wave_direction': wave_direction, 'theta': theta_range, 'radiating_dof': list(body.dofs.keys())
+    })
     # dataset = solver.fill_dataset(test_matrix, body, hydrostatics=True)
 
-    near_field_value = near_field(mesh, res[0], solver, problem[0])
+    near_field_value = near_field(mesh, res, solver, problems)
     print("Near field value:", near_field_value)
-    far_field_value = 5159.32773366
+    # far_field_value = far_field(dataset, a, fixed=False)[0][0][0]
+    far_field_value = 5159.32773365689
+    # far_field_value = 8172.3189351472065 #avec RAO 
     print("Far field value:", far_field_value)
+
+    # test_curvilinear_integration()
