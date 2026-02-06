@@ -7,7 +7,7 @@ import capytaine as cpt
 from capytaine.bem.problems_and_results import _default_parameters
 from capytaine.bem.airy_waves import airy_waves_free_surface_elevation, airy_waves_velocity
 from capytaine.post_pro.rao import rao
-from capytaine.new_meshes.geometry import compute_faces_normals
+from capytaine.meshes.geometry import compute_faces_normals
 
 ### Far field formulation ###
 def compute_kochin_global(dataset, a, fixed=False):
