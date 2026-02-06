@@ -5,7 +5,7 @@ from scipy.integrate import trapezoid
 
 import capytaine as cpt 
 from capytaine.bem.problems_and_results import _default_parameters
-from capytaine.bem.airy_waves import airy_waves_free_surface_elevation
+from capytaine.bem.airy_waves import airy_waves_free_surface_elevation, airy_waves_velocity
 from capytaine.post_pro.rao import rao
 from capytaine.new_meshes.geometry import compute_faces_normals
 
@@ -102,12 +102,12 @@ def edges_water_line(mesh):
             edges_water_line.append(list_indices)
             faces_water_line.append(mesh.faces[k,:])
 
-    return np.array(edges_water_line) # np.array(faces_water_line)
+    return np.array(edges_water_line), np.array(faces_water_line)
 
 def length_edges_water_line(mesh):
     """Return array of shape (nb_edges_water_line) with the length of the vertices"""
-    size = np.shape(edges_water_line(mesh))[0]
-    edges = edges_water_line(mesh)
+    size = np.shape(edges_water_line(mesh)[0])[0]
+    edges = edges_water_line(mesh)[0]
     vertices_left = mesh.vertices[edges[:,0],:]
     vertices_right = mesh.vertices[edges[:,1],:]
     length_water_line = np.zeros(size)
@@ -123,26 +123,49 @@ def water_line_integral(mesh, data):
 
 
 ### Near field formulation ###
-def near_field(mesh, res, solver, pb):
+def near_field(mesh, res, solver, pb, dataset, a):
     rho = pb[-1].rho
     g = pb[-1].g 
 
-    # X = rao(dataset)
+    X = rao(dataset) 
 
-    grad_phi = solver._compute_potential_gradient(mesh, res[-1]) #+ sum(solver._compute_potential_gradient(mesh, res[i])*X[:,0,i].item() for i in range(6))
+    def d(x):
+        return X[:,0,:3] + np.cross(X[:,0,3:], x)
+    
+    forces_first_order = dataset['excitation_force'] + compute_radiation_forces(X, dataset)
+
+    grad_phi = airy_waves_velocity(mesh, pb[-1]) + solver._compute_potential_gradient(mesh, res[-1]) + sum(X[:,0,i].item()*solver._compute_potential_gradient(mesh, res[i]) for i in range(6))
     grad_phi_square = np.sum(np.abs(grad_phi)**2, axis=1) 
-    coef1 = (rho/4)*mesh.surface_integral(grad_phi_square*mesh.faces_normals[:,0]) #je recupere la composante x pour l'instant 
+    time_der_grad_phi = -0.5*np.real(1j * pb[0].omega * np.sum(d(mesh.faces_centers)*np.conjugate(grad_phi), axis=1))
+    coef1 = (rho/4)*mesh.surface_integral((grad_phi_square + time_der_grad_phi)*mesh.faces_normals[:,0]) #je recupere la composante x pour l'instant 
 
-    edges = edges_water_line(mesh)
+    edges, faces = edges_water_line(mesh)
     vertices_left = mesh.vertices[edges[:,0],:]
     vertices_right = mesh.vertices[edges[:,1],:]
-    vertices_middle = ((vertices_left + vertices_right)/2)[:,:-1]
-    n_x = vertices_middle[:,0] / np.linalg.norm(vertices_middle, axis=1)
+    vertices_middle = ((vertices_left + vertices_right)/2) #[:,:-1]
+    normal = compute_faces_normals(mesh.vertices, faces)
+    n_x = normal[:,0] / np.sqrt(1-normal[:,-1]**2)
 
-    eta = airy_waves_free_surface_elevation(vertices_middle, pb[-1]) + solver.compute_free_surface_elevation(vertices_middle, res[-1]) #+ sum(solver.compute_free_surface_elevation(vertices_middle, res[i])*X[:,0,i].item() for i in range(6))
-    coef2 = (rho*g/4)*water_line_integral(mesh, np.abs(eta)**2*n_x)  #je recupere la composante x pour l'instant
+    eta = airy_waves_free_surface_elevation(vertices_middle, pb[-1]) + solver.compute_free_surface_elevation(vertices_middle, res[-1]) + sum(X[:,0,i].item()*solver.compute_free_surface_elevation(vertices_middle, res[i]) for i in range(6))
+    d3 = d(vertices_middle)[:,-1]
+    coef2 = (rho*g/4)*water_line_integral(mesh, (np.abs(eta - d3)**2*n_x).data)  #je recupere la composante x pour l'instant
 
-    return coef1 - coef2
+    coef3 = np.cross(X[0,0,3:], np.conjugate(forces_first_order[0,0,0:3]))
+    coef3 = 0.5*np.real(coef3)[0]
+
+    return a**2*(coef1 - coef2) + coef3
+
+def compute_radiation_forces(X, dataset):
+    F = np.zeros(6, dtype=complex)
+    A = dataset["added_mass"]
+    B = dataset["radiation_damping"]
+    omega = dataset["omega"]
+    for i in range(6):
+        F[i] = sum(omega**2*A[0,i,k] + 1j*omega*B[0,i,k]*X[0,0,k] for k in range(6)).item()
+
+    return F
+
+
 
 def test_curvilinear_integration():
     radius = 1
@@ -174,21 +197,22 @@ if __name__ == "__main__":
 
     solver = cpt.BEMSolver()
     problems = [
-        # cpt.RadiationProblem(body=body, radiating_dof=dof, wavenumber=k)
-        # for dof in body.dofs
+        cpt.RadiationProblem(body=body, radiating_dof=dof, wavenumber=k)
+        for dof in body.dofs
     ]
     problems.append(cpt.DiffractionProblem(body=body, wavenumber=k, wave_direction=wave_direction))
     res = solver.solve_all(problems)
     test_matrix = xr.Dataset(coords={
         'wavenumber': k, 'wave_direction': wave_direction, 'theta': theta_range, 'radiating_dof': list(body.dofs.keys())
     })
-    # dataset = solver.fill_dataset(test_matrix, body, hydrostatics=True)
+    dataset = solver.fill_dataset(test_matrix, body, hydrostatics=True)
 
-    near_field_value = near_field(mesh, res, solver, problems)
-    print("Near field value:", near_field_value)
-    # far_field_value = far_field(dataset, a, fixed=False)[0][0][0]
-    far_field_value = 5159.32773365689
-    # far_field_value = 8172.3189351472065 #avec RAO 
+    far_field_value = far_field(dataset, a)[0].item()
     print("Far field value:", far_field_value)
+    near_field_value = near_field(mesh, res, solver, problems, dataset, a).data
+    print("Near field value:", near_field_value)
+
+
+    print("error = ", np.abs(far_field_value - near_field_value)/far_field_value * 100)
 
     # test_curvilinear_integration()
