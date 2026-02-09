@@ -8,6 +8,9 @@ from capytaine.bem.problems_and_results import _default_parameters
 from capytaine.bem.airy_waves import airy_waves_free_surface_elevation, airy_waves_velocity
 from capytaine.post_pro.rao import rao
 from capytaine.meshes.geometry import compute_faces_normals
+from capytaine.io.xarray import assemble_dataset
+from capytaine.bem.problems_and_results import DiffractionProblem, DiffractionResult
+
 
 ### Far field formulation ###
 def compute_kochin_global(dataset, a, fixed=False):
@@ -123,21 +126,30 @@ def water_line_integral(mesh, data):
 
 
 ### Near field formulation ###
-def near_field(mesh, res, solver, pb, dataset, a):
-    rho = pb[-1].rho
-    g = pb[-1].g 
+def near_field(mesh, results, solver, problems, dataset, a):
+    rho = dataset['rho']
+    g = dataset['g']
+    omega = dataset['omega'].data
 
     X = rao(dataset) 
 
     def d(x):
-        return X[:,0,:3] + np.cross(X[:,0,3:], x)
+        size = np.shape(x)[0]
+        d = np.empty([len(omega),size,3], dtype=complex)
+        trans = X[:,0,:3]
+        rot = X[:,0,3:]
+        for line in range(size):
+            d[:,line,:] =  trans + np.cross(rot, x[line,:])
+        return d
     
-    forces_first_order = dataset['excitation_force'] + compute_radiation_forces(X, dataset)
+    forces_first_order = dataset['excitation_force'][:,0,:] + compute_radiation_forces(X, dataset)[:,0,:]
 
-    grad_phi = airy_waves_velocity(mesh, pb[-1]) + solver._compute_potential_gradient(mesh, res[-1]) + sum(X[:,0,i].item()*solver._compute_potential_gradient(mesh, res[i]) for i in range(6))
-    grad_phi_square = np.sum(np.abs(grad_phi)**2, axis=1) 
-    time_der_grad_phi = -0.5*np.real(1j * pb[0].omega * np.sum(d(mesh.faces_centers)*np.conjugate(grad_phi), axis=1))
-    coef1 = (rho/4)*mesh.surface_integral((grad_phi_square + time_der_grad_phi)*mesh.faces_normals[:,0]) #je recupere la composante x pour l'instant 
+    grad_phi = compute_total_velocity(solver, mesh, problems, results, X, omega)
+    grad_phi_square = np.sum(np.abs(grad_phi)**2, axis=2) 
+    time_der_grad_phi = compute_time_der_velocity(mesh, omega, d, grad_phi)
+    coef1 = np.empty([len(omega)])
+    for i in range(len(omega)):
+        coef1[i] = (rho/4)*mesh.surface_integral((grad_phi_square[i,:] + time_der_grad_phi[i,:])*mesh.faces_normals[:,0]) #je recupere la composante x pour l'instant 
 
     edges, faces = edges_water_line(mesh)
     vertices_left = mesh.vertices[edges[:,0],:]
@@ -146,22 +158,88 @@ def near_field(mesh, res, solver, pb, dataset, a):
     normal = compute_faces_normals(mesh.vertices, faces)
     n_x = normal[:,0] / np.sqrt(1-normal[:,-1]**2)
 
-    eta = airy_waves_free_surface_elevation(vertices_middle, pb[-1]) + solver.compute_free_surface_elevation(vertices_middle, res[-1]) + sum(X[:,0,i].item()*solver.compute_free_surface_elevation(vertices_middle, res[i]) for i in range(6))
-    d3 = d(vertices_middle)[:,-1]
-    coef2 = (rho*g/4)*water_line_integral(mesh, (np.abs(eta - d3)**2*n_x).data)  #je recupere la composante x pour l'instant
+    eta =  compute_free_surface_elevation(solver, vertices_middle, problems, results, X, omega)
+    d3 = d(vertices_middle)[:,:,-1]
+    coef2 = np.empty([len(omega)])
+    for i in range(len(omega)):
+        coef2[i] = (rho*g/4)*water_line_integral(mesh, (np.abs(eta[i,:] - d3[i,:])**2*n_x))  #je recupere la composante x pour l'instant
 
-    coef3 = np.cross(X[0,0,3:], np.conjugate(forces_first_order[0,0,0:3]))
-    coef3 = 0.5*np.real(coef3)[0]
+    coef3 = np.empty([len(omega)])
+    for i in range(len(omega)):
+        coef3[i] = 0.5*np.real(np.cross(X[i,0,3:], np.conjugate(forces_first_order[i,0:3])))[0]
 
-    return a**2*(coef1 - coef2) + coef3
+    return a**2*(coef1 - coef2 + coef3)
+
+def compute_free_surface_elevation(solver, vertices_middle, problems, results, X, omega):
+    len_omega = len(omega)
+    size = np.shape(vertices_middle)[0]
+    eta_incident = np.empty([len_omega,size], dtype=complex)
+    eta_diffraction = np.empty([len_omega,size], dtype=complex)
+    eta_radiation = np.zeros([len_omega,size], dtype=complex)
+
+    idx_omega = 0
+    for pb in problems:
+        if isinstance(pb, DiffractionProblem):
+            eta_incident[idx_omega,:] = airy_waves_free_surface_elevation(vertices_middle, pb)
+            idx_omega += 1
+
+    idx_omega_diff = 0 
+    for res in results: 
+        if isinstance(res, DiffractionResult):
+            eta_diffraction[idx_omega_diff,:] = solver.compute_free_surface_elevation(vertices_middle, res)
+            idx_omega_diff += 1 
+
+    for idx_omg, omg in enumerate(omega):
+        for idx_res, res in enumerate(results):
+            if res.__class__ == cpt.bem.problems_and_results.RadiationResult and res.omega == omg:
+                eta_radiation[idx_omg,:] += X[idx_omg,0,idx_res%7].item()*solver.compute_free_surface_elevation(vertices_middle, res)
+
+    return eta_incident + eta_diffraction + eta_radiation
+
+
+def compute_time_der_velocity(mesh, omega, d, grad_phi):
+    time_der_grad_phi = np.empty([len(omega),mesh.nb_faces])
+    dist = d(mesh.faces_centers)
+    for i in range(len(omega)):
+        time_der_grad_phi[i,:] = -0.5*np.real(1j * omega[i] * np.sum(dist[i,:,:]*np.conjugate(grad_phi[i,:,:]), axis=1))
+    return time_der_grad_phi
+
+
+def compute_total_velocity(solver, mesh, problems, results, X, omega):
+    len_omega = len(omega)
+    grad_phi_incident = np.empty([len_omega,mesh.nb_faces,3], dtype=complex)
+    grad_phi_diffraction = np.empty([len_omega,mesh.nb_faces,3], dtype=complex)
+    grad_phi_radiation = np.zeros([len_omega,mesh.nb_faces,3], dtype=complex)
+
+    idx_omega = 0
+    for pb in problems:
+        if isinstance(pb, DiffractionProblem):
+            grad_phi_incident[idx_omega,:,:] = airy_waves_velocity(mesh, pb)
+            idx_omega += 1
+
+    idx_omega_diff = 0 
+    for res in results: 
+        if isinstance(res, DiffractionResult):
+            grad_phi_diffraction[idx_omega_diff,:,:] = solver._compute_potential_gradient(mesh, res)
+            idx_omega_diff += 1 
+
+    for idx_omg, omg in enumerate(omega):
+        for idx_res, res in enumerate(results):
+            if res.__class__ == cpt.bem.problems_and_results.RadiationResult and res.omega == omg:
+                grad_phi_radiation[idx_omg,:,:] += X[idx_omg,0,idx_res%7].item()*solver._compute_potential_gradient(mesh, res)
+
+    return grad_phi_incident + grad_phi_diffraction + grad_phi_radiation
+
+
 
 def compute_radiation_forces(X, dataset):
-    F = np.zeros(6, dtype=complex)
     A = dataset["added_mass"]
     B = dataset["radiation_damping"]
+    F = np.zeros(np.shape(A), dtype=complex)
     omega = dataset["omega"]
-    for i in range(6):
-        F[i] = sum(omega**2*A[0,i,k] + 1j*omega*B[0,i,k]*X[0,0,k] for k in range(6)).item()
+    for m in range(len(omega)):
+        for i in range(6):
+            F[m,0,i] = sum(omega[m]**2*A[m,i,k] + 1j*omega[m]*B[m,i,k]*X[m,0,k] for k in range(6))
 
     return F
 
@@ -180,8 +258,7 @@ if __name__ == "__main__":
     rho = _default_parameters["rho"]
     a = 1
     wave_direction = 0
-    # omega_range = [0.5]
-    k = 1.25
+    k = [0.8, 1.25]
     radius = 1
     theta_range = np.linspace(0, 2*np.pi, 19)
 
@@ -197,22 +274,27 @@ if __name__ == "__main__":
 
     solver = cpt.BEMSolver()
     problems = [
-        cpt.RadiationProblem(body=body, radiating_dof=dof, wavenumber=k)
+        cpt.RadiationProblem(body=body, radiating_dof=dof, wavenumber=ki)
         for dof in body.dofs
+        for ki in k 
     ]
-    problems.append(cpt.DiffractionProblem(body=body, wavenumber=k, wave_direction=wave_direction))
+    problems.extend([cpt.DiffractionProblem(body=body, wavenumber=ki, wave_direction=wave_direction) for ki in k])
+
+
     res = solver.solve_all(problems)
     test_matrix = xr.Dataset(coords={
         'wavenumber': k, 'wave_direction': wave_direction, 'theta': theta_range, 'radiating_dof': list(body.dofs.keys())
     })
-    dataset = solver.fill_dataset(test_matrix, body, hydrostatics=True)
+    # dataset = solver.fill_dataset(test_matrix, body, hydrostatics=True)
+    dataset = assemble_dataset(res)
 
-    far_field_value = far_field(dataset, a)[0].item()
-    print("Far field value:", far_field_value)
-    near_field_value = near_field(mesh, res, solver, problems, dataset, a).data
+    # far_field_value = far_field(dataset, a)[0].item()
+    # print("Far field value:", far_field_value)
+    # value 1424.1530400928964 12519.895535206133
+    near_field_value = near_field(mesh, res, solver, problems, dataset, a)
     print("Near field value:", near_field_value)
 
 
-    print("error = ", np.abs(far_field_value - near_field_value)/far_field_value * 100)
+    # print("error = ", np.abs(far_field_value - near_field_value)/far_field_value * 100)
 
     # test_curvilinear_integration()
