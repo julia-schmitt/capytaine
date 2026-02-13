@@ -8,21 +8,19 @@ from capytaine.bem.problems_and_results import _default_parameters
 from capytaine.bem.airy_waves import airy_waves_free_surface_elevation, airy_waves_velocity
 from capytaine.post_pro.rao import rao
 from capytaine.meshes.geometry import compute_faces_normals
-from capytaine.io.xarray import assemble_dataset
+from capytaine.io.xarray import assemble_dataset, kochin_data_array
 from capytaine.bem.problems_and_results import DiffractionProblem, DiffractionResult
 
 
+
 ### Far field formulation ###
-def compute_kochin_global(dataset, a, fixed=False):
+def compute_kochin_global(X, dataset, a):
     Hd = dataset['kochin_diffraction']
     Hr = dataset['kochin_radiation'] 
-    X = rao(dataset) 
-    if fixed:
-        X = 0*X
     sum_HdX = sum(Hr[:,i,:]*X[:,0,i] for i in range(6)) 
     return a*np.exp(1j*np.pi/2)*(Hd + sum_HdX)
 
-def far_field(dataset, a, fixed=False):
+def far_field(X, dataset, a):
     omega = dataset['omega']
     k = dataset['wavenumber']
     h = dataset['water_depth']
@@ -37,7 +35,7 @@ def far_field(dataset, a, fixed=False):
         k0 = omega**2/g 
         coef2 = 2*np.pi*rho*k*(k0*h)**2 / (h*((k*h)**2 - (k0*h)**2 + k0*h))
  
-    H = compute_kochin_global(dataset, a, fixed)[:,0,:]
+    H = compute_kochin_global(X, dataset, a)[:,0,:]
     H_beta = H[:,np.where(theta == beta)[0][0]]
     coef1 = 2*np.pi*rho*a*omega
     
@@ -126,12 +124,10 @@ def water_line_integral(mesh, data):
 
 
 ### Near field formulation ###
-def near_field(mesh, results, solver, problems, dataset, a):
+def near_field(X, mesh, results, solver, problems, dataset, a):
     rho = dataset['rho']
     g = dataset['g']
     omega = dataset['omega'].data
-
-    X = rao(dataset) 
 
     def d(x):
         size = np.shape(x)[0]
@@ -139,7 +135,7 @@ def near_field(mesh, results, solver, problems, dataset, a):
         trans = X[:,0,:3]
         rot = X[:,0,3:]
         for line in range(size):
-            d[:,line,:] =  trans + np.cross(rot, x[line,:])
+            d[:,line,:] = trans + np.cross(rot, x[line,:])
         return d
     
     forces_first_order = dataset['excitation_force'][:,0,:] + compute_radiation_forces(X, dataset)[:,0,:]
@@ -147,9 +143,10 @@ def near_field(mesh, results, solver, problems, dataset, a):
     grad_phi = compute_total_velocity(solver, mesh, problems, results, X, omega)
     grad_phi_square = np.sum(np.abs(grad_phi)**2, axis=2) 
     time_der_grad_phi = compute_time_der_velocity(mesh, omega, d, grad_phi)
+    pressure_field = grad_phi_square/4 + time_der_grad_phi/2
     coef1 = np.empty([len(omega)])
     for i in range(len(omega)):
-        coef1[i] = (rho/4)*mesh.surface_integral((grad_phi_square[i,:] + time_der_grad_phi[i,:])*mesh.faces_normals[:,0]) #je recupere la composante x pour l'instant 
+        coef1[i] = rho*mesh.surface_integral(pressure_field[i,:]*mesh.faces_normals[:,0]) #je recupere la composante x pour l'instant 
 
     edges, faces = edges_water_line(mesh)
     vertices_left = mesh.vertices[edges[:,0],:]
@@ -168,7 +165,7 @@ def near_field(mesh, results, solver, problems, dataset, a):
     for i in range(len(omega)):
         coef3[i] = 0.5*np.real(np.cross(X[i,0,3:], np.conjugate(forces_first_order[i,0:3])))[0]
 
-    return a**2*(coef1 - coef2 + coef3)
+    return a**2*(coef1 - coef2) # + coef3)
 
 def compute_free_surface_elevation(solver, vertices_middle, problems, results, X, omega):
     len_omega = len(omega)
@@ -201,7 +198,8 @@ def compute_time_der_velocity(mesh, omega, d, grad_phi):
     time_der_grad_phi = np.empty([len(omega),mesh.nb_faces])
     dist = d(mesh.faces_centers)
     for i in range(len(omega)):
-        time_der_grad_phi[i,:] = -0.5*np.real(1j * omega[i] * np.sum(dist[i,:,:]*np.conjugate(grad_phi[i,:,:]), axis=1))
+        time_der_grad_phi[i,:] = np.real(np.sum(dist[i,:,:]*np.conjugate(-1j * omega[i] * grad_phi[i,:,:]), axis=1))
+
     return time_der_grad_phi
 
 
@@ -258,7 +256,7 @@ if __name__ == "__main__":
     rho = _default_parameters["rho"]
     a = 1
     wave_direction = 0
-    k = [0.8, 1.25]
+    k = np.array([0.3, 0.5, 0.83, 0.92, 1.0, 1.05, 1.09, 1.16, 1.24, 1.39, 1.59, 1.88, 2.28])
     radius = 1
     theta_range = np.linspace(0, 2*np.pi, 19)
 
@@ -276,7 +274,7 @@ if __name__ == "__main__":
     problems = [
         cpt.RadiationProblem(body=body, radiating_dof=dof, wavenumber=ki)
         for dof in body.dofs
-        for ki in k 
+        for ki in k
     ]
     problems.extend([cpt.DiffractionProblem(body=body, wavenumber=ki, wave_direction=wave_direction) for ki in k])
 
@@ -285,16 +283,28 @@ if __name__ == "__main__":
     test_matrix = xr.Dataset(coords={
         'wavenumber': k, 'wave_direction': wave_direction, 'theta': theta_range, 'radiating_dof': list(body.dofs.keys())
     })
-    # dataset = solver.fill_dataset(test_matrix, body, hydrostatics=True)
     dataset = assemble_dataset(res)
+    kochin = kochin_data_array(res, theta_range)
+    dataset.update(kochin)
 
-    # far_field_value = far_field(dataset, a)[0].item()
+    X = rao(dataset)
+
+    # far_field_value = far_field(X, dataset, a)[0]
     # print("Far field value:", far_field_value)
-    # value 1424.1530400928964 12519.895535206133
-    near_field_value = near_field(mesh, res, solver, problems, dataset, a)
-    print("Near field value:", near_field_value)
+    # # value 634.22990511 8172.31893515
+    # near_field_value = near_field(X, mesh, res, solver, problems, dataset, a)
+    # print("Near field value:", near_field_value)
 
+    F_analytic=[0, 0, 0.07, 0.26, 0.49, 0.70, 0.83, 0.88, 0.84, 0.72, 0.66, 0.655, 0.652]
+    F_Delhommeau= [0.035, 0.8373, 0.6700, 0.6265]
+    ka_Delhommeau= [0.77, 1.29, 1.53, 2.015]
 
-    # print("error = ", np.abs(far_field_value - near_field_value)/far_field_value * 100)
-
-    # test_curvilinear_integration()
+    plt.plot(k, F_analytic, '-o', label = 'analytical')
+    plt.plot(ka_Delhommeau, F_Delhommeau, '*', label = 'Delhommeau')
+    plt.grid()
+    plt.plot(k, far_field(X, dataset, a)[0]/(g*rho*a**2*radius), '-x', label='far field formulation')
+    plt.plot(k, near_field(X, mesh, res, solver, problems, dataset, a)/(g*rho*a**2*radius), '-v', label='near field formulation')
+    plt.legend()
+    plt.xlabel('k*r')
+    plt.ylabel('F_drift/(rho*g*a²*r)')
+    plt.show()
