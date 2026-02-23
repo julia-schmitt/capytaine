@@ -119,12 +119,11 @@ def test_curvilinear_integration():
 
 
 ### Near field formulation ###
-def near_field(X, mesh, body, results, solver, dataset, a):
-    #enlevr le a 
+def near_field(X, mesh, body, results, solver, dataset):
     # mesh via body via res 
     #on suppose qu'on a une fonction qui a toutes les radiations à cette freq et une diffraction et on itère pour les freq 
     # les 6 + 1 + 1 pb sont cohérents 
-    # a terme é au lieu de 1 + 1 
+    # a terme 2 au lieu de 1 + 1 
     #type de retour 3 diff (x,y,z) en translation 
     # on suppose qu'on a un seul objet rigide 
     # faire des fonctions indép pour chaque terme et aussi quantifier 
@@ -138,13 +137,14 @@ def near_field(X, mesh, body, results, solver, dataset, a):
         trans = X[:,0,:3]
         rot = X[:,0,3:]
         for line in range(size):
-            d[:,line,:] = trans + np.cross(rot, x[line,:])
+            for w in range(len(omega)):
+                d[w,line,:] = trans[w,:] + np.cross(rot[w,:], x[line,:])
         return d
     
     S = body.hydrostatic_stiffness #body depuis res 
     hydro = np.zeros([len(omega),6], dtype=complex)
     for i in range(len(omega)):
-        hydro[i,2] = -(S[2,2]*X[i,:,2] + S[2,3]*X[i,:,3] - S[2,4]*X[i,:,4])
+        hydro[i,2] = -(S[2,2]*X[i,:,2] + S[2,3]*X[i,:,3] + S[2,4]*X[i,:,4])
     forces_first_order = dataset['excitation_force'][:,0,:] + compute_radiation_forces(X, dataset)[:,0,:] + hydro 
 
     grad_phi = compute_total_velocity(solver, mesh, results, X, omega)
@@ -182,7 +182,9 @@ def near_field(X, mesh, body, results, solver, dataset, a):
                         - S[2,3]* np.real(X[i,:,4]*np.conjugate(X[i,:,5])) \
                         + S[2,4]*np.real(X[i,:,3]*np.conjugate(X[i,:,5])))
 
-    return a**2*(coef1 - coef2 + coef3 + coef4), pressure_field
+    return (coef1 - coef2 + coef3 + coef4), pressure_field
+
+
 
 def compute_free_surface_elevation(solver, vertices_middle, results, X, omega):
     len_omega = len(omega)
@@ -265,9 +267,9 @@ def compute_radiation_forces(X, dataset):
 def hemisphere_example():
     g = _default_parameters["g"]
     rho = _default_parameters["rho"]
-    a = 2
+    a = 1
     wave_direction = 0
-    radius = 2
+    radius = 1
     theta_range = np.linspace(0, 2*np.pi, 19)
 
     resolution = (50,50)
@@ -304,7 +306,7 @@ def hemisphere_example():
 
         X = rao(dataset)
 
-        F_near, pressure_field = near_field(X, mesh, body, res, solver, dataset, a)
+        F_near, pressure_field = near_field(X, mesh, body, res, solver, dataset)
         # mesh.show(backend="pyvista", color_field=pressure_field[5,:], cmap=plt.get_cmap("hot"))
 
         return F_near, dataset, X
@@ -318,7 +320,7 @@ def hemisphere_example():
     # Fz_near, _, _= solve(kz)
 
     plt.subplot(121)
-    plt.plot(kx*radius, Fx, '-o', label = 'analytical', color = 'black')
+    # plt.plot(kx*radius, Fx, '-o', label = 'analytical', color = 'black')
     plt.grid()
     plt.plot(kx*radius, Fx_far/factor, '-x', label='far field formulation', color='green')
     plt.plot(kx*radius, Fx_near[:,0]/factor, '-v', label='near field formulation', color='blue')
@@ -404,13 +406,14 @@ def barge_DNV_example():
     wave_direction = 0
     theta_range = np.linspace(0, 2*np.pi, 19)
 
-    resolution = (9,9,8)
+    resolution = (10,10,8)
     mesh = cpt.mesh_parallelepiped(size=(90,90,80), resolution=resolution).immersed_part()
     # mesh.show()
     lid_mesh = mesh.generate_lid()
     # lid_mesh.show()
     F_Delhommeau = [456776.57, 400045.81, 404889.49, 464429.14, 344675.27, 233204.32, 617723.82, 41779.49, 1647.74, 1293.86, 641.40]
-    T= [6.46, 8.44, 9.24, 10.32, 12.23, 14.20, 16.23, 18.14, 20.07, 22.20, 26.13]
+    T= np.array([6.46, 8.44, 9.24, 10.32, 12.23, 14.20, 16.23, 18.14, 20.07, 22.20, 26.13])
+    omega = np.flip(2*np.pi/T)
 
     F_DNV = [515895.9857, 339709.948, 249803.3144,	538079.5905, 177800.5972, 121125.1363]
     T_DNV =[10.071552, 12.157682, 14.133594, 16.344162, 18.18097, 19.832452]
@@ -427,11 +430,11 @@ def barge_DNV_example():
 
     solver = cpt.BEMSolver()
     problems = [
-        cpt.RadiationProblem(body=body, radiating_dof=dof, period=per)
+        cpt.RadiationProblem(body=body, radiating_dof=dof, omega=omg)
         for dof in body.dofs
-        for per in T
+        for omg in omega
     ]
-    problems.extend([cpt.DiffractionProblem(body=body, period=per, wave_direction=wave_direction) for per in T])
+    problems.extend([cpt.DiffractionProblem(body=body, omega=omg, wave_direction=wave_direction) for omg in omega])
 
     res = solver.solve_all(problems)
     dataset = assemble_dataset(res)
@@ -439,23 +442,21 @@ def barge_DNV_example():
     dataset.update(kochin)
 
     X = rao(dataset)
-    X[:,:,1] = 0
-    X[:,:,3] = 0
-    X[:,:,5] = 0
-    # X[:,:,2] = 0
+
     F_far = far_field(X, dataset)['drift_force_surge']
-    F_near, _ = near_field(X, body.mesh, body, res, solver, dataset, a)
+    F_near, _ = near_field(X, body.mesh, body, res, solver, dataset)
 
     factor = a**2
 
     plt.grid()
-    plt.plot(T, F_far/factor, '-x', label='far field formulation', color='green')
+    plt.plot(T, np.flip(F_far)/factor, '-x', label='far field formulation', color='green')
     plt.plot(T, np.flip(F_near[:,0])/factor, '-v', label='near field formulation', color='blue')
     plt.plot(T, F_Delhommeau, '-o', label = 'Delhommeau', color = 'black')
     plt.plot(T_DNV, F_DNV, '-^', label='experiments', color = 'red')
     plt.legend()
     plt.xlabel('T (period)')
     plt.ylabel('Fx/a²')
+    plt.title(f"Caisson DNV, resolution = {resolution}")
     plt.show()
 
 
