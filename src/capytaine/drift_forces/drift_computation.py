@@ -70,7 +70,6 @@ def far_field(X, dataset):
 
 ### Mesh utilities for near field formulation ###
 #PR a part + test des cas limites 
-#probleme quand un seul sommet style triangle
 def edges_water_line(mesh): 
     """Return array of shape (nb_edges_water_line,2) with the indices of the vertices"""
     epsilon = 1e-6
@@ -124,21 +123,27 @@ def test_curvilinear_integration():
 
 
 ### Near field formulation ###
-   # mesh via body via res 
     #on suppose qu'on a une fonction qui a toutes les radiations à cette freq et une diffraction et on itère pour les freq 
     # les 6 + 1 + 1 pb sont cohérents 
     # a terme 2 au lieu de 1 + 1 
+    # virer le dataset 
     #type de retour 3 diff (x,y,z) en translation 
     # on suppose qu'on a un seul objet rigide 
-    # faire des fonctions indép pour chaque terme et aussi quantifier
 
-def near_field(X, mesh, body, results, solver, dataset):
+def near_field(X, results, solver, dataset):
     main_freq_type = Counter((res.provided_freq_type for res in results)).most_common(1)[0][0] #passer en arg 
     len_freq = len(results)//7
-    S = body.hydrostatic_stiffness #body depuis res 
-    rho = dataset['rho']
-    g = dataset['g']
+    # tous les res ont le meme body et le meme mesh ? 
+    mesh = results[0].body.mesh 
+    S = results[0].body.hydrostatic_stiffness 
+    # tous les res ont le meme rho et g ?  
+    rho = results[0].rho 
+    g = results[0].g
     omega = X.coords['omega']
+
+    # for res in results:
+    #     if isinstance(res, DiffractionResult):
+    #         print(res.records['diffraction_force'])
 
     pressure_field = compute_pressure_field(mesh, solver, results, X) 
     coef1 = surface_integral_term(rho, mesh, len_freq, pressure_field)
@@ -207,6 +212,17 @@ def water_line_integral_term(rho, g, mesh, len_freq, free_surface_elevation_fiel
     return -res
 
 def forces_first_order_term(X, len_freq, forces_first_order):
+    # for res in results:
+    #     freq = getattr(res, main_freq_type)
+
+    #     if isinstance(res, DiffractionResult):
+    #         phi_grad['incident'].loc[{main_freq_type: freq}] = airy_waves_velocity(mesh, res)
+    #         phi_grad['diffraction'].loc[{main_freq_type: freq}] = solver._compute_potential_gradient(mesh, res)
+
+    #     if isinstance(res, RadiationResult):
+    #         X_rad = X.sel({main_freq_type: freq, 'radiating_dof': res.radiating_dof}).values
+    #         phi_grad['radiation'].loc[{main_freq_type: freq}] += X_rad * solver._compute_potential_gradient(mesh, res)
+
     res = np.empty([len_freq,3])
     for i in range(len_freq):
         res[i,:] = 0.5*np.real(np.cross(X[i,0,3:], np.conjugate(forces_first_order[i,0:3])))
@@ -484,7 +500,7 @@ def barge_DNV_example():
     # # plotter.view_xy(negative=True)
     # plotter.view_xy(negative=True)
     # plotter.show()
-    F_near = near_field(X, body.mesh, body, res, solver, dataset)
+    F_near = near_field(X, res, solver, dataset)
     factor = a**2
 
     # plt.grid()
@@ -501,5 +517,4 @@ def barge_DNV_example():
 
 if __name__ == "__main__":
     # hemisphere_example()
-    # barge_DNV_example()
-    test_curvilinear_integration()
+    barge_DNV_example()
