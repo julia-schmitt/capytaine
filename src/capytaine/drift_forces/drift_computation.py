@@ -131,56 +131,57 @@ def test_curvilinear_integration():
     # on suppose qu'on a un seul objet rigide 
 
 def near_field(X, results, solver, dataset):
-    main_freq_type = Counter((res.provided_freq_type for res in results)).most_common(1)[0][0] #passer en arg 
-    len_freq = len(results)//7
     # tous les res ont le meme body et le meme mesh ? 
     mesh = results[0].body.mesh 
     S = results[0].body.hydrostatic_stiffness 
     # tous les res ont le meme rho et g ?  
     rho = results[0].rho 
     g = results[0].g
+
     omega = X.coords['omega']
+    len_freq = len(omega)
+    len_dir = len(X.coords['wave_direction'])
 
-    # for res in results:
-    #     if isinstance(res, DiffractionResult):
-    #         print(res.records['diffraction_force'])
-
-    pressure_field = compute_pressure_field(mesh, solver, results, X) 
-    coef1 = surface_integral_term(rho, mesh, len_freq, pressure_field)
+    pressure_field = compute_pressure_field(mesh, solver, results, X).values
+    coef1 = surface_integral_term(rho, mesh, len_freq, len_dir, pressure_field)
 
     free_surf_elev_field = free_surface_elevation_field(mesh, solver, results, X)
-    coef2 = water_line_integral_term(rho, g, mesh, len_freq, free_surf_elev_field)
+    coef2 = water_line_integral_term(rho, g, mesh, len_freq, len_dir, free_surf_elev_field)
 
     hydro = compute_hydro_forces(S, len_freq, X)
-    forces_first_order = dataset['excitation_force'][:,0,:] + compute_radiation_forces(X, dataset, omega)[:,0,:] + hydro 
+    forces_first_order = dataset['excitation_force'][:,0,:] + compute_radiation_forces(X, dataset, omega, results)[:,0,:] + hydro 
     coef3 = forces_first_order_term(X, len_freq, forces_first_order)
     coef4 = forces_hydrostatics_term(len_freq, X, S)
 
     forces = coef1 + coef2 + coef3 + coef4
-    print(coef1)
-    print(coef2)
-    print(coef3)
-    print(coef4)
-    print(forces)
+
+    dims = [d for d in X.dims if d != 'radiating_dof']
+    coords = {c: X.coords[c] for c in X.coords if c != 'radiating_dof'}
+
+    # print(forces)
+    # print(np.shape(forces))
+
+    # F = xr.DataArray(
+    #     data=forces,
+    #     coords=coords,
+    #     dims=dims,
+    #     name='drift_force'
+    #     )
 
     return forces
 
 def d(x, X):
-    size = np.shape(x)[0]
-    len_freq = len(X.coords['omega'])
-    d = np.empty([len_freq,size,3], dtype=complex)
-    trans = X.sel(radiating_dof=['Surge', 'Sway', 'Heave']) 
-    rot = X.sel(radiating_dof=['Roll', 'Pitch', 'Yaw'])
-    for k in range(len_freq):
-        d[k,:,:] = trans[k,:] + np.cross(rot[k,:], x)
-    return d
+    trans = X.sel(radiating_dof=['Surge', 'Sway', 'Heave']).values
+    rot = X.sel(radiating_dof=['Roll', 'Pitch', 'Yaw']).values
+    res = trans[:, :, None, :] + np.cross(rot[:, :, None, :], x[None, None, :, :])
+    return res
     
 
 def compute_pressure_field(mesh, solver, results, X):
     grad_phi = total_potential_gradient(solver, mesh, results, X)
     omega = grad_phi.coords['omega']
     time_der_grad_phi = time_derivative_potential_gradient(mesh, d, grad_phi, omega, X)
-    grad_phi_square = np.sum(np.abs(grad_phi)**2, axis=2) 
+    grad_phi_square = np.sum(np.abs(grad_phi)**2, axis=3) 
     return grad_phi_square/4 + time_der_grad_phi/2
 
 def free_surface_elevation_field(mesh, solver, results, X):
@@ -188,27 +189,29 @@ def free_surface_elevation_field(mesh, solver, results, X):
     vertices_middle = ((mesh.vertices[edges[:,0],:] + mesh.vertices[edges[:,1],:])/2) 
     
     eta = total_free_surface_elevation(solver, vertices_middle, results, X)
-    d3 = d(vertices_middle,X)[:,:,-1]
+    d3 = d(vertices_middle,X)[:,:,:,-1]
 
     return np.abs(eta - d3)**2
 
-def surface_integral_term(rho, mesh, len_freq, pressure_field):
-    res = np.empty([len_freq,3])
-    for i in range(len_freq):
-        for dim in range(3):
-            res[i,dim] = rho*mesh.surface_integral(pressure_field[i,:]*mesh.faces_normals[:,dim]) 
+def surface_integral_term(rho, mesh, len_freq, len_dir, pressure_field):
+    res = np.empty([len_freq, len_dir, 3])
+    for beta in range(len_dir):
+        for i in range(len_freq):
+            for dim in range(3):
+                res[i,beta,dim] = rho*mesh.surface_integral(pressure_field[i,beta,:]*mesh.faces_normals[:,dim]) 
     return res  
 
-def water_line_integral_term(rho, g, mesh, len_freq, free_surface_elevation_field):
+def water_line_integral_term(rho, g, mesh, len_freq, len_dir, free_surface_elevation_field):
     edges, faces = edges_water_line(mesh)
     normal = compute_faces_normals(mesh.vertices, faces)
     normal[:,-1] = 0
     for k in range(np.shape(normal)[0]):
         normal[k,:] /= np.sqrt(normal[k,0]**2 + normal[k,1]**2)
-    res = np.empty([len_freq,3])
-    for i in range(len_freq):
-        for dim in range(2):
-            res[i,dim] = (rho*g/4)*water_line_integral(mesh, free_surface_elevation_field[i,:]*normal[:,dim])
+    res = np.empty([len_freq,len_dir,3])
+    for beta in range(len_dir):
+        for i in range(len_freq):
+            for dim in range(2):
+                res[i,beta,dim] = (rho*g/4)*water_line_integral(mesh, free_surface_elevation_field[i,beta,:]*normal[:,dim])
     return -res
 
 def forces_first_order_term(X, len_freq, forces_first_order):
@@ -232,8 +235,8 @@ def forces_hydrostatics_term(len_freq, X, S):
     res = np.zeros([len_freq,3])
     for i in range(len_freq):
         res[i,-1] = 1/4*(S[2,2]*(np.abs(X[i,:,3])**2 + np.abs(X[i,:,4])**2) \
-                        - S[2,3]* np.real(X[i,:,4]*np.conjugate(X[i,:,5])) \
-                        + S[2,4]*np.real(X[i,:,3]*np.conjugate(X[i,:,5])))
+                        - 2*S[2,3]* np.real(X[i,:,4]*np.conjugate(X[i,:,5])) \
+                        + 2*S[2,4]*np.real(X[i,:,3]*np.conjugate(X[i,:,5])))
     return res
 
 def compute_hydro_forces(S, len_freq, X):
@@ -245,14 +248,15 @@ def compute_hydro_forces(S, len_freq, X):
 
 def total_free_surface_elevation(solver, vertices_middle, results, X):
     main_freq_type = Counter((res.provided_freq_type for res in results)).most_common(1)[0][0] #passer en arg 
-    len_freq = len(results)//7
+    len_freq = len(X.coords['omega'])
+    len_dir = len(X.coords['wave_direction'])
     size = np.shape(vertices_middle)[0]
-    eta = xr.Dataset(coords={main_freq_type: X.coords[main_freq_type], 'vertices_water_line': np.arange(size)})
+    eta = xr.Dataset(coords={main_freq_type: X.coords[main_freq_type], 'wave_direction': X.coords['wave_direction'], 'vertices_water_line': np.arange(size)})
 
-    empty_data = np.zeros((len_freq, size), dtype=complex)
-    eta['incident'] = ([main_freq_type, 'vertex'], empty_data)
-    eta['diffraction'] = ([main_freq_type, 'vertex'], empty_data.copy())
-    eta['radiation'] = ([main_freq_type, 'vertex'], empty_data.copy())
+    empty_data = np.zeros((len_freq, len_dir, size), dtype=complex)
+    eta['incident'] = ([main_freq_type, 'wave_direction', 'vertex'], empty_data)
+    eta['diffraction'] = ([main_freq_type, 'wave_direction', 'vertex'], empty_data.copy())
+    eta['radiation'] = ([main_freq_type, 'wave_direction', 'vertex'], empty_data.copy())
 
     for res in results:
         freq = getattr(res, main_freq_type)
@@ -270,13 +274,14 @@ def total_free_surface_elevation(solver, vertices_middle, results, X):
 
 def total_potential_gradient(solver, mesh, results, X):
     main_freq_type = Counter((res.provided_freq_type for res in results)).most_common(1)[0][0] #passer en arg 
-    len_freq = len(results)//7
+    len_freq = len(X.coords['omega'])
+    len_dir = len(X.coords['wave_direction'])
     size = mesh.nb_faces
-    phi_grad = xr.Dataset(coords={main_freq_type: X.coords[main_freq_type], 'faces': np.arange(size), 'space': np.arange(3)})
-    empty_data = np.zeros((len_freq, size, 3), dtype=complex)
-    phi_grad['incident'] = ([main_freq_type, 'face', 'space'], empty_data)
-    phi_grad['diffraction'] = ([main_freq_type, 'face', 'space'], empty_data.copy())
-    phi_grad['radiation'] = ([main_freq_type, 'face', 'space'], empty_data.copy())
+    phi_grad = xr.Dataset(coords={main_freq_type: X.coords[main_freq_type], 'wave_direction': X.coords['wave_direction'], 'face': np.arange(size), 'space': np.arange(3)})
+    empty_data = np.zeros((len_freq, len_dir, size, 3), dtype=complex)
+    phi_grad['incident'] = ([main_freq_type, 'wave_direction', 'face', 'space'], empty_data)
+    phi_grad['diffraction'] = ([main_freq_type, 'wave_direction', 'face', 'space'], empty_data.copy())
+    phi_grad['radiation'] = ([main_freq_type, 'wave_direction', 'face', 'space'], empty_data.copy())
 
     for res in results:
         freq = getattr(res, main_freq_type)
@@ -293,21 +298,28 @@ def total_potential_gradient(solver, mesh, results, X):
 
 
 def time_derivative_potential_gradient(mesh, d, grad_phi, omega, X):
-    time_der_grad_phi = np.empty([len(omega),mesh.nb_faces])
     dist = d(mesh.faces_centers,X)
-    for k in range(len(omega)):
-        time_der_grad_phi[k,:] = np.real(np.sum(dist[k,:,:]*np.conjugate(-1j * omega[k] * grad_phi[k,:,:]), axis=1))
-
+    time_der_grad_phi = np.real(np.sum(dist*np.conjugate(-1j * omega * grad_phi), axis=3))
     return time_der_grad_phi
 
 
-def compute_radiation_forces(X, dataset, omega):
+def compute_radiation_forces(X, dataset, omega, results):
     A = dataset["added_mass"]
     B = dataset["radiation_damping"]
     F = np.zeros(np.shape(A), dtype=complex)
     for m in range(len(omega)):
         for i in range(6):
             F[m,0,i] = sum((omega[m]**2*A[m,i,k] + 1j*omega[m]*B[m,i,k])*X[m,0,k] for k in range(6))
+
+    # force = xr.DataArray(data=np.zeros(list(X.sizes.values()), dtype=complex), coords=X.coords, dims=X.dims)
+
+    # for res in results:
+    #     if isinstance(res, RadiationResult):
+    #         print(res.added_mass)
+    #         print(res.added_mass['Surge'])
+    #         print(X.radiating_dof)
+    #         force.loc[{'omega':res.omega, 'radiating_dof':res.radiating_dof}] = sum((res.omega**2*res.added_mass[dof.values] + 1j*res.omega*res.radiation_damping[dof.values])*X.sel(radiating_dof=dof) for dof in X.radiating_dof)
+            
 
     return F
 
@@ -319,15 +331,12 @@ def compute_radiation_forces(X, dataset, omega):
 
 ### EXAMPLE ### 
 def hemisphere_example():
-    import capytaine as cpt
-
     g = _default_parameters["g"]
     rho = _default_parameters["rho"]
     a = 1
     wave_direction = 0
     radius = 1
     theta_range = np.linspace(0, 2*np.pi, 19)
-
     resolution = (50,50)
     mesh = cpt.mesh_sphere(radius=radius, resolution=resolution, center=(0,0,0)).immersed_part()
     lid_mesh = mesh.generate_lid()
@@ -340,13 +349,11 @@ def hemisphere_example():
             ).immersed_part()
     body.inertia_matrix = body.compute_rigid_body_inertia()
     body.hydrostatic_stiffness = body.compute_hydrostatic_stiffness()
-    field = np.array([np.cos(4*np.pi*x) for (x, y, z) in mesh.faces_centers])  # Array of shape (nb_faces,)
     solver = cpt.BEMSolver()
 
-    # kx = np.array([0.3, 0.5, 0.83, 0.92, 1.0, 1.05, 1.09, 1.16, 1.24, 1.39, 1.59, 1.88, 2.28])
-    k = np.array([0.8])
-    # k = kx/radius
-    kz = [0.09582684505613773, 0.18238014348096274, 0.29675431763881227, 0.43585787086713385, 0.602782181908937, 0.7357032134903257, 0.8902627170773499, 0.9737249905177946, 1.0139103199469692, 1.0602781710230764, 1.1221019724578862, 1.16537868063007, 1.2457495753275052, 1.3848531285558265, 1.6228749055832958, 1.987635192545221]
+    F_analytic=[0, 0, 0.07, 0.26, 0.49, 0.70, 0.83, 0.88, 0.84, 0.72, 0.66, 0.655, 0.652]
+    k = np.array([0.3, 0.5, 0.83, 0.92, 1.0, 1.05, 1.09, 1.16, 1.24, 1.39, 1.59, 1.88, 2.28])
+    # k = np.array([0.8, 0.2])
 
     problems = [
         cpt.RadiationProblem(body=body, radiating_dof=dof, wavenumber=ki)
@@ -356,35 +363,26 @@ def hemisphere_example():
     problems.extend([cpt.DiffractionProblem(body=body, wavenumber=ki, wave_direction=wave_direction) for ki in k])
 
     res = solver.solve_all(problems)
+
+    # for r in res:
+    #     if isinstance(r, DiffractionResult):
+    #         print(len(r.records))
+    #         print(r.records[0]['diffraction_force'])
+
     dataset = assemble_dataset(res)
     kochin = kochin_data_array(res, theta_range)
     dataset.update(kochin)
-
     X = rao(dataset)
+    F_near = near_field(X, res, solver, dataset)
+    factor = rho*g*a**2*radius
 
-    F_near = near_field(X, mesh, body, res, solver, dataset)
-    # plotter = pv.Plotter()
-    # pressure_field = compute_pressure_field(mesh, solver, res, X)[0,:].data
-    # plotter = mesh.show(backend="pyvista", color_field=pressure_field, cmap=plt.get_cmap("hot"), plotter=plotter)
-    # plotter.view_xy(negative=True)
-    # plotter.show()
+    plt.plot(k, F_analytic, '-o', label = 'analytical')
+    plt.plot(k, F_near[:,0]/factor, '-v', label='near field formulation')
+    plt.legend()
+    plt.xlabel('k*r')
+    plt.ylabel('F_drift/(rho*g*a²*r)')
+    plt.show()
 
-    # views = [
-    #     ("bottom", lambda: plotter.view_xy(negative=True)),       # Vue de dessus (XY)
-    #     ("front", plotter.view_xz),     # Vue de face (XZ)
-    #     ("side", plotter.view_yz),      # Vue de côté (YZ)
-    #     ("iso", plotter.view_isometric) # Vue Isométrique
-    # ]
-
-    # for name, view_func in views:
-    #     view_func() # Change l'angle de la caméra
-    #     plotter.reset_camera() # Recadre sur l'objet
-    #     plotter.render()
-        
-    #     # Capture du screenshot
-    #     output_path = f"sphere_{name}.png"
-    #     plotter.screenshot(output_path)
-    #     print(f"Sauvegardé : {output_path}")
 
 
 
@@ -516,5 +514,5 @@ def barge_DNV_example():
 
 
 if __name__ == "__main__":
-    # hemisphere_example()
-    barge_DNV_example()
+    hemisphere_example()
+    # barge_DNV_example()
