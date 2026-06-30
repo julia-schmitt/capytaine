@@ -174,12 +174,12 @@ class AbstractMesh(SurfaceIntegralsMixin, ABC):
 
     @cached_property
     def _waterline_data(self):
-        """Extract the water line of the mesh.
+        """Extract the waterline of the mesh.
 
         Returns
         -------
         (np.ndarray, np.ndarray)
-            A tuple (edges, faces) where the edges are the edges of the water line (pairs of vertex indices)
+            A tuple (edges, faces) where the edges are the edges of the waterline (pairs of vertex indices)
             and the faces are the corresponding faces id of the mesh that contain these edges.
         """
         epsilon = 1e-6
